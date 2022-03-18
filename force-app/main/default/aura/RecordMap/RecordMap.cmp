@@ -14,7 +14,7 @@
 
     <aura:handler name="init" value="{!this}" action="{!c.doInit}" />
 
-    Hej jeg hedder fisk
+    Hej jeg hedder ikke fisk
     <force:recordData aura:id="service"
                          recordId="{!v.dsRecordId}"
                          targetFields="{!v.sObject}"
