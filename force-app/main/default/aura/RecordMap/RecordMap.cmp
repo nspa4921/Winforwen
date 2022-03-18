@@ -14,7 +14,11 @@
 
     <aura:handler name="init" value="{!this}" action="{!c.doInit}" />
 
+<<<<<<< HEAD
     Nemo har laver en ændring
+=======
+    Jonas har lavet en ændring
+>>>>>>> 797901ee7db3b33a383086d1e4390e2a81acc4a1
     <force:recordData aura:id="service"
                          recordId="{!v.dsRecordId}"
                          targetFields="{!v.sObject}"
