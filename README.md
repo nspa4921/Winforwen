@@ -1,3 +1,240 @@
+import { LightningElement, track } from 'lwc';
+import subscribeToNewsletter from '@salesforce/apex/NCNewsletterSignupService.subscribeToNewsletter';
+import unsubscribeFromNewsletter from '@salesforce/apex/NCNewsletterSignupService.unsubscribeFromNewsletter';
+
+export default class NewsletterSignup extends LightningElement {
+    @track email = '';
+    @track browserId = '';
+    @track message = '';
+    @track error = '';
+    @track loading = false;
+    @track showModal = false;
+
+    handleEmailChange(event) {
+        this.email = event.target.value;
+    }
+    handleBrowserIdChange(event) {
+        this.browserId = event.target.value;
+        console.log(this.browserId, "br id");
+    }
+    handleSubmit() {
+        this.loading = true;
+        this.message = '';
+        this.error = '';
+        subscribeToNewsletter({ email: this.email, browserId: this.browserId })
+            .then(result => {
+                this.message = result;
+                this.loading = false;
+                this.showModal = true;
+                // Email is NOT sent immediately. Scheduled Apex will handle it.
+            })
+            .catch(error => {
+                this.error = error.body ? error.body.message : error.message;
+                this.loading = false;
+            });
+    }
+
+    closeModal() {
+        this.showModal = false;
+    }
+
+    handleUnsubscribe(event) {
+        event.preventDefault();
+        this.loading = true;
+        this.message = '';
+        this.error = '';
+        unsubscribeFromNewsletter({ email: this.email })
+            .then(result => {
+                this.message = result;
+                this.loading = false;
+            })
+            .catch(error => {
+                this.error = error.body ? error.body.message : error.message;
+                this.loading = false;
+            });
+    }
+}
+
+public without sharing class NCNewsletterSignupService {
+  @AuraEnabled
+  public static String subscribeToNewsletter(String email, String browserId) {
+    if (String.isBlank(email)) {
+      throw new AuraHandledException('Email is required.');
+    }
+
+    // Try to find Individual by browserId (if provided)
+    Individual individual = null;
+    if (!String.isBlank(browserId)) {
+      List<Individual> individuals = [
+        SELECT Id
+        FROM Individual
+        WHERE Browser_Id__c = :browserId
+        LIMIT 1
+      ];
+      if (!individuals.isEmpty()) {
+        individual = individuals[0];
+      }
+    }
+
+    List<Lead> existingLeads = [
+      SELECT Id, Email
+      FROM Lead
+      WHERE Email = :email
+      LIMIT 1
+    ];
+
+    if (!existingLeads.isEmpty()) {
+      // If lead already exists, do not create
+      return 'You are already subscribed.';
+    }
+
+    // Create new Lead, link to Individual if found
+    Lead newLead = new Lead(
+      FirstName = 'Newsletter',
+      LastName = 'Subscriber',
+      Email = email,
+      Company = 'Newsletter',
+      Status = 'Subscribed',
+      LeadSource = 'Newsletter',
+      IndividualId = (individual != null ? individual.Id : null) // Lookup(Individual)
+      // Newsletter_Email_Sent__c left as default (false)
+    );
+    insert newLead;
+
+    // If Individual exists, update related Assessments/Responses
+    if (individual != null) {
+      List<Assessment> assessments = [
+        SELECT Id
+        FROM Assessment
+        WHERE Individual__c = :individual.Id
+      ];
+      List<AssessmentQuestionResponse> toUpdate = new List<AssessmentQuestionResponse>();
+      for (Assessment ass : assessments) {
+        for (AssessmentQuestionResponse resp : [
+          SELECT Id
+          FROM AssessmentQuestionResponse
+          WHERE AssessmentId = :ass.Id
+        ]) {
+          resp.Lead__c = newLead.Id; // Lookup(Lead)
+          toUpdate.add(resp);
+        }
+      }
+      if (!toUpdate.isEmpty()) {
+        update toUpdate;
+      }
+    }
+    return 'You are now subscribed to our newsletter';
+  }
+
+  // Sends a single email to the given address with subject and body
+  @AuraEnabled
+  public static Boolean sendSingleEmail(String toEmail, String subject, String body) {
+    if (String.isBlank(toEmail)) {
+      throw new AuraHandledException('Email address is required.');
+    }
+    Messaging.reserveSingleEmailCapacity(1);
+    EmailTemplate[] templates = [SELECT Id FROM EmailTemplate WHERE Name = 'NovoCare Newsletter Welcome Email' LIMIT 1];
+    Messaging.SingleEmailMessage mail = new Messaging.SingleEmailMessage();
+    mail.setToAddresses(new List<String>{ toEmail });
+    if (!templates.isEmpty()) {
+      List<Lead> leads = [SELECT Id FROM Lead WHERE Email = :toEmail LIMIT 1];
+      if (!leads.isEmpty()) {
+        mail.setTargetObjectId(leads[0].Id);
+        mail.setTemplateId(templates[0].Id);
+        mail.setSaveAsActivity(false);
+      } else {
+        mail.setSubject(subject);
+        mail.setPlainTextBody(body);
+      }
+    } else {
+      mail.setSubject(subject);
+      mail.setPlainTextBody(body);
+    }
+    OrgWideEmailAddress[] orgEmails = [SELECT Id FROM OrgWideEmailAddress WHERE Address = 'nemo.spaske@gmail.com' LIMIT 1];
+    if (!orgEmails.isEmpty()) {
+        mail.setOrgWideEmailAddressId(orgEmails[0].Id);
+    }
+    Messaging.SendEmailResult[] results = Messaging.sendEmail(new List<Messaging.SingleEmailMessage>{ mail });
+    return results != null && results.size() > 0 && results[0].isSuccess();
+  }
+
+  @AuraEnabled
+  public static String unsubscribeFromNewsletter(String email) {
+    if (String.isBlank(email)) {
+      throw new AuraHandledException('Email is required.');
+    }
+    List<Lead> leads = [SELECT Id, Status, UnsubscribedDate__c FROM Lead WHERE Email = :email LIMIT 1];
+    if (leads.isEmpty()) {
+      return 'No subscription found for this email.';
+    }
+    Lead lead = leads[0];
+    lead.Status = 'Unsubscribed';
+    lead.UnsubscribedDate__c = System.now();
+    update lead;
+    EmailTemplate[] templates = [SELECT Id FROM EmailTemplate WHERE Name = 'NovoCare Newsletter Unsubscribe Email' LIMIT 1];
+    if (!templates.isEmpty()) {
+      Messaging.reserveSingleEmailCapacity(1);
+      Messaging.SingleEmailMessage mail = new Messaging.SingleEmailMessage();
+      mail.setTargetObjectId(lead.Id);
+      mail.setTemplateId(templates[0].Id);
+      mail.setSaveAsActivity(false);
+      OrgWideEmailAddress[] orgEmails = [SELECT Id FROM OrgWideEmailAddress WHERE Address = 'nemo.spaske@gmail.com' LIMIT 1];
+      if (!orgEmails.isEmpty()) {
+        mail.setOrgWideEmailAddressId(orgEmails[0].Id);
+      }
+      Messaging.sendEmail(new List<Messaging.SingleEmailMessage>{ mail });
+    }
+    return 'You have been unsubscribed.';
+  }
+}
+
+
+
+global class NCNewsletterScheduledEmail implements Schedulable {
+    global void execute(SchedulableContext sc) {
+        // Find leads created more than 1 hour ago, but not yet sent newsletter email
+        Datetime oneHourAgo = System.now().addHours(-1);
+        List<Lead> leads = [
+            SELECT Id, Email, IndividualId, Newsletter_Email_Sent__c
+            FROM Lead
+            WHERE CreatedDate <= :oneHourAgo
+            AND Newsletter_Email_Sent__c = false
+            AND Status = 'Subscribed'
+            AND Email != null
+        ];
+
+        for (Lead lead : leads) {
+            Boolean hasAssessment = false;
+            if (lead.IndividualId != null) {
+                List<Assessment> assessments = [
+                    SELECT Id FROM Assessment WHERE Individual__c = :lead.IndividualId LIMIT 1
+                ];
+                hasAssessment = !assessments.isEmpty();
+            }
+
+            if (hasAssessment) {
+                NCNewsletterSignupService.sendSingleEmail(
+                    lead.Email,
+                    'Assessment Created - Welcome!',
+                    'Thank you for subscribing and completing your assessment!'
+                );
+            } else {
+                NCNewsletterSignupService.sendSingleEmail(
+                    lead.Email,
+                    'Welcome to NovoCare Newsletter!',
+                    'Thank you for subscribing! Complete your assessment for more personalized content.'
+                );
+            }
+            lead.Newsletter_Email_Sent__c = true;
+        }
+        if (!leads.isEmpty()) {
+            update leads;
+        }
+    }
+}
+
+///////////////////////////////////  --------------------------- ///////////////////////////////////////
+
 
 global with sharing class NCNewsletterScheduledEmail implements Schedulable {
 
