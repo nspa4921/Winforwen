@@ -1,334 +1,124 @@
+Super, ovo je zaokružena verzija koja radi tačno šta želiš:
+– jedan Schedulable na 15 min cilja Lead-ove kreirane između 60 i 45 min ranije, koji imaju Status = 'Subscribed', nisu poslali mejl (Newsletter_Email_Sent__c = false) i imaju email.
+– Ako postoji bar 1 Assessment__c za njihovog Individual → šalje Email A; u suprotnom Email B.
+– Koristi OrgWideEmailAddress (kao u tvojoj metodi) i email template-ove.
+– Sve je bulk-ifikovano i sa ispravnim tipovima/generics.
+
+
+---
+
+LWC (sitna ispravka – uklonjen slučajni backtick)
+
 import { LightningElement, track } from 'lwc';
 import subscribeToNewsletter from '@salesforce/apex/NCNewsletterSignupService.subscribeToNewsletter';
 import unsubscribeFromNewsletter from '@salesforce/apex/NCNewsletterSignupService.unsubscribeFromNewsletter';
 
 export default class NewsletterSignup extends LightningElement {
-    @track email = '';
-    @track browserId = '';
-    @track message = '';
-    @track error = '';
-    @track loading = false;
-    @track showModal = false;
+  @track email = '';
+  @track browserId = '';
+  @track message = '';
+  @track error = '';
+  @track loading = false;
+  @track showModal = false;
 
-    handleEmailChange(event) {
-        this.email = event.target.value;
-    }
-    handleBrowserIdChange(event) {
-        this.browserId = event.target.value;
-        console.log(this.browserId, "br id");
-    }
-    handleSubmit() {
-        this.loading = true;
-        this.message = '';
-        this.error = '';
-        subscribeToNewsletter({ email: this.email, browserId: this.browserId })
-            .then(result => {
-                this.message = result;
-                this.loading = false;
-                this.showModal = true;
-                // Email is NOT sent immediately. Scheduled Apex will handle it.
-            })
-            .catch(error => {
-                this.error = error.body ? error.body.message : error.message;
-                this.loading = false;
-            });
-    }
+  handleEmailChange(event) { this.email = event.target.value; }
+  handleBrowserIdChange(event) { this.browserId = event.target.value; }
 
-    closeModal() {
-        this.showModal = false;
-    }
+  handleSubmit() {
+    this.loading = true; this.message = ''; this.error = '';
+    subscribeToNewsletter({ email: this.email, browserId: this.browserId })
+      .then(result => { this.message = result; this.showModal = true; })
+      .catch(error => { this.error = error.body ? error.body.message : error.message; })
+      .finally(() => { this.loading = false; });
+  }
 
-    handleUnsubscribe(event) {
-        event.preventDefault();
-        this.loading = true;
-        this.message = '';
-        this.error = '';
-        unsubscribeFromNewsletter({ email: this.email })
-            .then(result => {
-                this.message = result;
-                this.loading = false;
-            })
-            .catch(error => {
-                this.error = error.body ? error.body.message : error.message;
-                this.loading = false;
-            });
-    }
+  closeModal() { this.showModal = false; }
+
+  handleUnsubscribe(event) {
+    event.preventDefault();
+    this.loading = true; this.message = ''; this.error = '';
+    unsubscribeFromNewsletter({ email: this.email })
+      .then(result => { this.message = result; })
+      .catch(error => { this.error = error.body ? error.body.message : error.message; })
+      .finally(() => { this.loading = false; });
+  }
 }
 
-public without sharing class NCNewsletterSignupService {
-  @AuraEnabled
-  public static String subscribeToNewsletter(String email, String browserId) {
-    if (String.isBlank(email)) {
-      throw new AuraHandledException('Email is required.');
-    }
 
-    // Try to find Individual by browserId (if provided)
-    Individual individual = null;
-    if (!String.isBlank(browserId)) {
-      List<Individual> individuals = [
-        SELECT Id
-        FROM Individual
-        WHERE Browser_Id__c = :browserId
-        LIMIT 1
-      ];
-      if (!individuals.isEmpty()) {
-        individual = individuals[0];
-      }
-    }
+---
 
-    List<Lead> existingLeads = [
-      SELECT Id, Email
-      FROM Lead
-      WHERE Email = :email
-      LIMIT 1
-    ];
+NCNewsletterSignupService.cls (servis + helperi)
 
-    if (!existingLeads.isEmpty()) {
-      // If lead already exists, do not create
-      return 'You are already subscribed.';
-    }
+> Napomena o poljima:
+• Lead.IndividualId – standard lookup na Individual (ostavljam ga jer ga već koristiš).
+• Lead.Status – koristi vrednosti 'Subscribed' i 'Unsubscribed' kao kod tebe.
+• Lead.Newsletter_Email_Sent__c (Checkbox) i Lead.UnsubscribedDate__c (Datetime) – tvoja custom polja.
+• Assessment__c.Individual__c – pretpostavka (u tvojoj bazi je objekat Assessment/Assessment__c; ispod koristi Assessment__c – promeni naziv ako ti je drugačiji).
 
-    // Create new Lead, link to Individual if found
-    Lead newLead = new Lead(
-      FirstName = 'Newsletter',
-      LastName = 'Subscriber',
-      Email = email,
-      Company = 'Newsletter',
-      Status = 'Subscribed',
-      LeadSource = 'Newsletter',
-      IndividualId = (individual != null ? individual.Id : null) // Lookup(Individual)
-      // Newsletter_Email_Sent__c left as default (false)
-    );
-    insert newLead;
 
-    // If Individual exists, update related Assessments/Responses
-    if (individual != null) {
-      List<Assessment> assessments = [
-        SELECT Id
-        FROM Assessment
-        WHERE Individual__c = :individual.Id
-      ];
-      List<AssessmentQuestionResponse> toUpdate = new List<AssessmentQuestionResponse>();
-      for (Assessment ass : assessments) {
-        for (AssessmentQuestionResponse resp : [
-          SELECT Id
-          FROM AssessmentQuestionResponse
-          WHERE AssessmentId = :ass.Id
-        ]) {
-          resp.Lead__c = newLead.Id; // Lookup(Lead)
-          toUpdate.add(resp);
+
+public with sharing class NCNewsletterSignupService {
+
+    @AuraEnabled
+    public static String subscribeToNewsletter(String email, String browserId) {
+        if (String.isBlank(email)) {
+            throw new AuraHandledException('Email is required.');
         }
-      }
-      if (!toUpdate.isEmpty()) {
-        update toUpdate;
-      }
-    }
-    return 'You are now subscribed to our newsletter';
-  }
 
-  // Sends a single email to the given address with subject and body
-  @AuraEnabled
-  public static Boolean sendSingleEmail(String toEmail, String subject, String body) {
-    if (String.isBlank(toEmail)) {
-      throw new AuraHandledException('Email address is required.');
-    }
-    Messaging.reserveSingleEmailCapacity(1);
-    EmailTemplate[] templates = [SELECT Id FROM EmailTemplate WHERE Name = 'NovoCare Newsletter Welcome Email' LIMIT 1];
-    Messaging.SingleEmailMessage mail = new Messaging.SingleEmailMessage();
-    mail.setToAddresses(new List<String>{ toEmail });
-    if (!templates.isEmpty()) {
-      List<Lead> leads = [SELECT Id FROM Lead WHERE Email = :toEmail LIMIT 1];
-      if (!leads.isEmpty()) {
-        mail.setTargetObjectId(leads[0].Id);
-        mail.setTemplateId(templates[0].Id);
-        mail.setSaveAsActivity(false);
-      } else {
-        mail.setSubject(subject);
-        mail.setPlainTextBody(body);
-      }
-    } else {
-      mail.setSubject(subject);
-      mail.setPlainTextBody(body);
-    }
-    OrgWideEmailAddress[] orgEmails = [SELECT Id FROM OrgWideEmailAddress WHERE Address = 'nemo.spaske@gmail.com' LIMIT 1];
-    if (!orgEmails.isEmpty()) {
-        mail.setOrgWideEmailAddressId(orgEmails[0].Id);
-    }
-    Messaging.SendEmailResult[] results = Messaging.sendEmail(new List<Messaging.SingleEmailMessage>{ mail });
-    return results != null && results.size() > 0 && results[0].isSuccess();
-  }
+        // Poveži Individual po browserId (ako postoji)
+        Individual individual = null;
+        if (!String.isBlank(browserId)) {
+            List<Individual> inds = [
+                SELECT Id
+                FROM Individual
+                WHERE Browser_Id__c = :browserId
+                LIMIT 1
+            ];
+            if (!inds.isEmpty()) individual = inds[0];
+        }
 
-  @AuraEnabled
-  public static String unsubscribeFromNewsletter(String email) {
-    if (String.isBlank(email)) {
-      throw new AuraHandledException('Email is required.');
-    }
-    List<Lead> leads = [SELECT Id, Status, UnsubscribedDate__c FROM Lead WHERE Email = :email LIMIT 1];
-    if (leads.isEmpty()) {
-      return 'No subscription found for this email.';
-    }
-    Lead lead = leads[0];
-    lead.Status = 'Unsubscribed';
-    lead.UnsubscribedDate__c = System.now();
-    update lead;
-    EmailTemplate[] templates = [SELECT Id FROM EmailTemplate WHERE Name = 'NovoCare Newsletter Unsubscribe Email' LIMIT 1];
-    if (!templates.isEmpty()) {
-      Messaging.reserveSingleEmailCapacity(1);
-      Messaging.SingleEmailMessage mail = new Messaging.SingleEmailMessage();
-      mail.setTargetObjectId(lead.Id);
-      mail.setTemplateId(templates[0].Id);
-      mail.setSaveAsActivity(false);
-      OrgWideEmailAddress[] orgEmails = [SELECT Id FROM OrgWideEmailAddress WHERE Address = 'nemo.spaske@gmail.com' LIMIT 1];
-      if (!orgEmails.isEmpty()) {
-        mail.setOrgWideEmailAddressId(orgEmails[0].Id);
-      }
-      Messaging.sendEmail(new List<Messaging.SingleEmailMessage>{ mail });
-    }
-    return 'You have been unsubscribed.';
-  }
-}
-
-
-
-global class NCNewsletterScheduledEmail implements Schedulable {
-    global void execute(SchedulableContext sc) {
-        // Find leads created more than 1 hour ago, but not yet sent newsletter email
-        Datetime oneHourAgo = System.now().addHours(-1);
-        List<Lead> leads = [
-            SELECT Id, Email, IndividualId, Newsletter_Email_Sent__c
-            FROM Lead
-            WHERE CreatedDate <= :oneHourAgo
-            AND Newsletter_Email_Sent__c = false
-            AND Status = 'Subscribed'
-            AND Email != null
+        // Ne dupliraj Lead po emailu
+        List<Lead> existingLeads = [
+            SELECT Id FROM Lead WHERE Email = :email LIMIT 1
         ];
-
-        for (Lead lead : leads) {
-            Boolean hasAssessment = false;
-            if (lead.IndividualId != null) {
-                List<Assessment> assessments = [
-                    SELECT Id FROM Assessment WHERE Individual__c = :lead.IndividualId LIMIT 1
-                ];
-                hasAssessment = !assessments.isEmpty();
-            }
-
-            if (hasAssessment) {
-                NCNewsletterSignupService.sendSingleEmail(
-                    lead.Email,
-                    'Assessment Created - Welcome!',
-                    'Thank you for subscribing and completing your assessment!'
-                );
-            } else {
-                NCNewsletterSignupService.sendSingleEmail(
-                    lead.Email,
-                    'Welcome to NovoCare Newsletter!',
-                    'Thank you for subscribing! Complete your assessment for more personalized content.'
-                );
-            }
-            lead.Newsletter_Email_Sent__c = true;
-        }
-        if (!leads.isEmpty()) {
-            update leads;
-        }
-    }
-}
-
-///////////////////////////////////  --------------------------- ///////////////////////////////////////
-
-
-global with sharing class NCNewsletterScheduledEmail implements Schedulable {
-
-    global void execute(SchedulableContext sc) {
-
-        // Window: [now-60m , now-45m)
-        Datetime windowStart = System.now().addMinutes(-60);
-        Datetime windowEnd   = System.now().addMinutes(-45);
-
-        // Pick leads to email
-        List<Lead> leads = [
-            SELECT Id, Email, Status, Individual__c, Newsletter_Email_Sent__c
-            FROM Lead
-            WHERE CreatedDate >= :windowStart
-              AND CreatedDate  < :windowEnd
-              AND Email != null
-              AND Newsletter_Email_Sent__c = false
-              AND Status != 'Unsubscribed'
-            LIMIT 5000
-        ];
-        if (leads.isEmpty()) return;
-
-        // Build lookup sets/maps
-        Set<Id> individualIds = new Set<Id>();
-        for (Lead l : leads) if (l.Individual__c != null) individualIds.add(l.Individual__c);
-
-        // Do they have assessments?
-        // Use whichever object you truly track completion on:
-        //  A) Assessment__c by Individual__c
-        Map<Id, Boolean> individualHasAssessment = new Map<Id, Boolean>();
-        if (!individualIds.isEmpty()) {
-            for (AggregateResult ar : [
-                SELECT Individual__c ind, COUNT(Id) c
-                FROM Assessment__c
-                WHERE Individual__c IN :individualIds
-                GROUP BY Individual__c
-            ]) {
-                individualHasAssessment.put((Id)ar.get('ind'), ((Decimal)ar.get('c')) > 0);
-            }
+        if (!existingLeads.isEmpty()) {
+            return 'You are already subscribed.';
         }
 
-        // Prepare emails (use templates by Name)
-        Id orgWideId = NCNewsletterSignupService.getOrgWideIdByAddress('nemo.spasak@gmail.com'); // <= change to yours
+        // Kreiraj Lead
+        Lead newLead = new Lead(
+            FirstName = 'Newsletter',
+            LastName  = 'Subscriber',
+            Email     = email,
+            Company   = 'Newsletter',
+            Status    = 'Subscribed',
+            LeadSource= 'Newsletter',
+            IndividualId = (individual != null ? individual.Id : null) // standard field
+            // Newsletter_Email_Sent__c ostaje default false
+        );
+        insert newLead;
 
-        // Cache template Ids once
-        Id templateA = NCNewsletterSignupService.getTemplateIdByName('NovoCare Newsletter – Assessment Complete'); // Email A
-        Id templateB = NCNewsletterSignupService.getTemplateIdByName('NovoCare Newsletter – Welcome / Complete Assessment'); // Email B
+        // (Opcionalno) Ako postoji Individual, poveži postojeće odgovore na novi Lead
+        if (individual != null) {
+            List<Assessment__c> assessments = [
+                SELECT Id FROM Assessment__c WHERE Individual__c = :individual.Id
+            ];
 
-        List<Messaging.SingleEmailMessage> msgs = new List<Messaging.SingleEmailMessage>();
-        for (Lead l : leads) {
-            Boolean hasAsm = (l.Individual__c != null) && individualHasAssessment.get(l.Individual__c) == true;
-            Id tpl = hasAsm ? templateA : templateB;
-            Messaging.SingleEmailMessage m = NCNewsletterSignupService.buildTemplatedEmail(l.Id, l.Email, tpl, orgWideId);
-            if (m != null) msgs.add(m);
-        }
-
-        if (!msgs.isEmpty()) {
-            List<Messaging.SendEmailResult> results = Messaging.sendEmail(msgs, false);
-
-            // Mark success + collect failures
-            List<Lead> toUpdate = new List<Lead>();
-            for (Integer i = 0; i < results.size(); i++) {
-                if (results[i].isSuccess()) {
-                    Lead l = leads[i].clone(false, true, false, false);
-                    l.Id = leads[i].Id;
-                    l.put('Newsletter_Email_Sent__c', true);
-                    if (Schema.sObjectType.Lead.fields.getMap().containsKey('Newsletter_Email_Sent_Date__c')) {
-                        l.put('Newsletter_Email_Sent_Date__c', System.now());
-                    }
-                    toUpdate.add(l);
-                } else {
-                    // Log but don't throw – avoid killing the job
-                    System.debug(LoggingLevel.WARN,
-                        'Email failed for Lead ' + leads[i].Id + ': ' + results[i].getErrors()[0].getMessage());
+            List<AssessmentQuestionResponse__c> toUpdate = new List<AssessmentQuestionResponse__c>();
+            for (Assessment__c a : assessments) {
+                for (AssessmentQuestionResponse__c r : [
+                    SELECT Id FROM AssessmentQuestionResponse__c WHERE Assessment__c = :a.Id
+                ]) {
+                    r.Lead__c = newLead.Id;
+                    toUpdate.add(r);
                 }
             }
             if (!toUpdate.isEmpty()) update toUpdate;
         }
+        return 'You are now subscribed to our newsletter';
     }
 
-    // Helper to schedule: “run every 15 minutes”
-    public static void scheduleEvery15Min() {
-        // CRON: second minute hour dayOfMonth month dayOfWeek year(optional)
-        // 0 0/15 * * * ?  -> every 15 minutes
-        System.schedule('Newsletter job scheduler (15m)', '0 0/15 * * * ?', new NCNewsletterScheduledEmail());
-    }
-}
-
-
-#‐---------
-
-public with sharing class NCNewsletterSignupService {
-
-    // existing methods...
+    // ---------- Email helperi (Org-Wide + Template) ----------
 
     public static Id getOrgWideIdByAddress(String address) {
         OrgWideEmailAddress owea = [
@@ -344,19 +134,157 @@ public with sharing class NCNewsletterSignupService {
         return t.Id;
     }
 
-    // Build a SingleEmailMessage using a classic email template + Lead/Contact as target
-    public static Messaging.SingleEmailMessage buildTemplatedEmail(Id whoId, String toEmail, Id templateId, Id orgWideId) {
-        if (whoId == null || toEmail == null || templateId == null) return null;
-
+    // Sastavi SingleEmailMessage za Lead sa template-om
+    public static Messaging.SingleEmailMessage buildTemplatedEmail(Id leadId, String toEmail, Id templateId, Id orgWideId) {
+        if (leadId == null || String.isBlank(toEmail) || templateId == null) return null;
         Messaging.SingleEmailMessage mail = new Messaging.SingleEmailMessage();
-        mail.setTargetObjectId(whoId);     // must be a Lead or Contact when using a template
+        mail.setTargetObjectId(leadId);           // Lead/Contact obavezno za template
         mail.setTemplateId(templateId);
-        mail.setOrgWideEmailAddressId(orgWideId);
-        mail.setSaveAsActivity(false);     // optional
-        mail.setToAddresses(new String[] { toEmail });
+        mail.setToAddresses(new String[]{ toEmail });
+        if (orgWideId != null) mail.setOrgWideEmailAddressId(orgWideId);
+        mail.setSaveAsActivity(false);
         return mail;
     }
+
+    // (Zadržiš i postojeći unsubscribe)
+
+    @AuraEnabled
+    public static String unsubscribeFromNewsletter(String email) {
+        if (String.isBlank(email)) {
+            throw new AuraHandledException('Email is required.');
+        }
+        List<Lead> leads = [SELECT Id, Status, UnsubscribedDate__c FROM Lead WHERE Email = :email LIMIT 1];
+        if (leads.isEmpty()) return 'No subscription found for this email.';
+
+        Lead l = leads[0];
+        l.Status = 'Unsubscribed';
+        l.UnsubscribedDate__c = System.now();
+        update l;
+
+        // Pošalji potvrdu o odjavi (ako imaš template)
+        if (Schema.getGlobalDescribe().get('EmailTemplate') != null) {
+            List<EmailTemplate> templates = [SELECT Id FROM EmailTemplate WHERE Name = 'NovoCare Newsletter Unsubscribe Email' LIMIT 1];
+            if (!templates.isEmpty()) {
+                Messaging.reserveSingleEmailCapacity(1);
+                Id owea = getOrgWideIdByAddress('nemo.spaske@gmail.com'); // promeni na svoju adresu
+                Messaging.SingleEmailMessage mail = buildTemplatedEmail(l.Id, email, templates[0].Id, owea);
+                Messaging.sendEmail(new List<Messaging.SingleEmailMessage>{ mail });
+            }
+        }
+        return 'You have been unsubscribed.';
+    }
 }
+
+
+---
+
+NCNewsletterScheduledEmail.cls (svakih 15 min, prozor 60–45 min)
+
+> Zameni IMENA TEMPLATE-OVA ispod prema stvarnim nazivima u tvojoj org-u:
+TPL_ASSESSMENT_DONE = „Email A”,
+TPL_WELCOME_COMPLETE_ASM = „Email B”.
+
+
+
+global with sharing class NCNewsletterScheduledEmail implements Schedulable {
+
+    global void execute(SchedulableContext sc) {
+
+        // Obradi lead-ove kreirane pre tačno ~1h (prozor 60–45 min)
+        Datetime windowStart = System.now().addMinutes(-60);
+        Datetime windowEnd   = System.now().addMinutes(-45);
+
+        List<Lead> leads = [
+            SELECT Id, Email, Status, IndividualId, Newsletter_Email_Sent__c
+            FROM Lead
+            WHERE CreatedDate >= :windowStart
+              AND CreatedDate  < :windowEnd
+              AND Newsletter_Email_Sent__c = false
+              AND Status = 'Subscribed'
+              AND Email != null
+            LIMIT 5000
+        ];
+        if (leads.isEmpty()) return;
+
+        // Sakupi IndividualId za lookup
+        Set<Id> individualIds = new Set<Id>();
+        for (Lead l : leads) if (l.IndividualId != null) individualIds.add(l.IndividualId);
+
+        // Mapiraj: Individual -> ima li Assessment
+        Map<Id, Boolean> hasAsmByIndividual = new Map<Id, Boolean>();
+        if (!individualIds.isEmpty()) {
+            for (AggregateResult ar : [
+                SELECT Individual__c ind, COUNT(Id) c
+                FROM Assessment__c
+                WHERE Individual__c IN :individualIds
+                GROUP BY Individual__c
+            ]) {
+                hasAsmByIndividual.put((Id)ar.get('ind'), ((Decimal)ar.get('c')) > 0);
+            }
+        }
+
+        // Priprema template-ova i OrgWide
+        final String TPL_ASSESSMENT_DONE       = 'NovoCare Newsletter – Assessment Complete';          // Email A
+        final String TPL_WELCOME_COMPLETE_ASM  = 'NovoCare Newsletter – Welcome / Complete Assessment'; // Email B
+
+        Id tplA = NCNewsletterSignupService.getTemplateIdByName(TPL_ASSESSMENT_DONE);
+        Id tplB = NCNewsletterSignupService.getTemplateIdByName(TPL_WELCOME_COMPLETE_ASM);
+        Id owea = NCNewsletterSignupService.getOrgWideIdByAddress('nemo.spaske@gmail.com'); // promeni na svoju OWEA adresu
+
+        List<Messaging.SingleEmailMessage> msgs = new List<Messaging.SingleEmailMessage>();
+        for (Lead l : leads) {
+            Boolean hasAsm = l.IndividualId != null && hasAsmByIndividual.get(l.IndividualId) == true;
+            Id tpl = hasAsm ? tplA : tplB;
+            Messaging.SingleEmailMessage m = NCNewsletterSignupService.buildTemplatedEmail(l.Id, l.Email, tpl, owea);
+            if (m != null) msgs.add(m);
+        }
+
+        if (!msgs.isEmpty()) {
+            List<Messaging.SendEmailResult> res = Messaging.sendEmail(msgs, false);
+
+            // Obeleži poslate
+            List<Lead> toUpd = new List<Lead>();
+            for (Integer i = 0; i < res.size(); i++) {
+                if (res[i].isSuccess()) {
+                    Lead l = new Lead(Id = leads[i].Id);
+                    l.Newsletter_Email_Sent__c = true;
+                    toUpd.add(l);
+                } else {
+                    // ne bacaj exception da ne ubiješ job; samo log
+                    System.debug(LoggingLevel.WARN,
+                        'Email failed for Lead ' + leads[i].Id + ': ' +
+                        (res[i].getErrors().isEmpty() ? 'Unknown' : res[i].getErrors()[0].getMessage()));
+                }
+            }
+            if (!toUpd.isEmpty()) update toUpd;
+        }
+    }
+
+    // Jedan raspored na 15 minuta
+    public static void scheduleEvery15Min() {
+        System.schedule('Newsletter job scheduler (15m)', '0 0/15 * * * ?', new NCNewsletterScheduledEmail());
+    }
+}
+
+
+---
+
+Kako da zakažeš (jedan jedini job)
+
+Setup → Apex Classes → Schedule Apex
+Name: Newsletter job scheduler (15m)
+CRON: 0 0/15 * * * ?
+
+
+---
+
+Tip
+
+Greška iz mejla EMAIL_ADDRESS_BOUNCED znači da je adresa obeležena kao bounced na Lead/Contact-u. Na zapisu klikni Reset Bounced Email (ili očisti polja EmailBouncedDate/EmailBouncedReason) pre testiranja.
+
+Ako ti je objekat/field API ime drugačije (npr. Assessment umesto Assessment__c, AssessmentId/Assessment__c u odgovorima), samo reci tačna imena i prepakujem gore kod tačno na tvoja polja.
+
+
 
 #-☆☆☆☆
 
