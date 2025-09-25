@@ -1,288 +1,214 @@
-Super, ovo je zaokružena verzija koja radi tačno šta želiš:
-– jedan Schedulable na 15 min cilja Lead-ove kreirane između 60 i 45 min ranije, koji imaju Status = 'Subscribed', nisu poslali mejl (Newsletter_Email_Sent__c = false) i imaju email.
-– Ako postoji bar 1 Assessment__c za njihovog Individual → šalje Email A; u suprotnom Email B.
-– Koristi OrgWideEmailAddress (kao u tvojoj metodi) i email template-ove.
-– Sve je bulk-ifikovano i sa ispravnim tipovima/generics.
+Super — evo gotovog Apex + LWC rešenja za public “Unsubscribe” stranu na Experience Cloud-u.
+Kada user klikne link iz emaila (.../s/unsubscribe?token=...), komponenta pročita token, pozove Apex i setuje Lead.Status = "Unsubscribed" (po želji i Email_Opt_Out = true). Prikaže se poruka o uspehu ili grešci.
 
 
 ---
 
-LWC (sitna ispravka – uklonjen slučajni backtick)
+Apex controller
 
-import { LightningElement, track } from 'lwc';
-import subscribeToNewsletter from '@salesforce/apex/NCNewsletterSignupService.subscribeToNewsletter';
-import unsubscribeFromNewsletter from '@salesforce/apex/NCNewsletterSignupService.unsubscribeFromNewsletter';
+classes/NewsletterUnsubscribeController.cls
 
-export default class NewsletterSignup extends LightningElement {
-  @track email = '';
-  @track browserId = '';
-  @track message = '';
-  @track error = '';
-  @track loading = false;
-  @track showModal = false;
+public with sharing class NewsletterUnsubscribeController {
 
-  handleEmailChange(event) { this.email = event.target.value; }
-  handleBrowserIdChange(event) { this.browserId = event.target.value; }
+    public class UnsubscribeResult {
+        @AuraEnabled public Boolean success;
+        @AuraEnabled public String message;
+    }
 
-  handleSubmit() {
-    this.loading = true; this.message = ''; this.error = '';
-    subscribeToNewsletter({ email: this.email, browserId: this.browserId })
-      .then(result => { this.message = result; this.showModal = true; })
-      .catch(error => { this.error = error.body ? error.body.message : error.message; })
-      .finally(() => { this.loading = false; });
-  }
+    @AuraEnabled(cacheable=false)
+    public static UnsubscribeResult unsubscribeUser(String token) {
+        UnsubscribeResult res = new UnsubscribeResult();
 
-  closeModal() { this.showModal = false; }
-
-  handleUnsubscribe(event) {
-    event.preventDefault();
-    this.loading = true; this.message = ''; this.error = '';
-    unsubscribeFromNewsletter({ email: this.email })
-      .then(result => { this.message = result; })
-      .catch(error => { this.error = error.body ? error.body.message : error.message; })
-      .finally(() => { this.loading = false; });
-  }
-}
-
-
----
-
-NCNewsletterSignupService.cls (servis + helperi)
-
-> Napomena o poljima:
-• Lead.IndividualId – standard lookup na Individual (ostavljam ga jer ga već koristiš).
-• Lead.Status – koristi vrednosti 'Subscribed' i 'Unsubscribed' kao kod tebe.
-• Lead.Newsletter_Email_Sent__c (Checkbox) i Lead.UnsubscribedDate__c (Datetime) – tvoja custom polja.
-• Assessment__c.Individual__c – pretpostavka (u tvojoj bazi je objekat Assessment/Assessment__c; ispod koristi Assessment__c – promeni naziv ako ti je drugačiji).
-
-
-
-public with sharing class NCNewsletterSignupService {
-
-    @AuraEnabled
-    public static String subscribeToNewsletter(String email, String browserId) {
-        if (String.isBlank(email)) {
-            throw new AuraHandledException('Email is required.');
+        if (String.isBlank(token)) {
+            res.success = false;
+            res.message = 'Missing token.';
+            return res;
         }
 
-        // Poveži Individual po browserId (ako postoji)
-        Individual individual = null;
-        if (!String.isBlank(browserId)) {
-            List<Individual> inds = [
-                SELECT Id
-                FROM Individual
-                WHERE Browser_Id__c = :browserId
-                LIMIT 1
-            ];
-            if (!inds.isEmpty()) individual = inds[0];
-        }
-
-        // Ne dupliraj Lead po emailu
-        List<Lead> existingLeads = [
-            SELECT Id FROM Lead WHERE Email = :email LIMIT 1
+        // Nađi lead po jedinstvenom tokenu
+        List<Lead> leads = [
+            SELECT Id, Status, Email_Opt_Out
+            FROM Lead
+            WHERE Newsletter_Token__c = :token
+            LIMIT 1
         ];
-        if (!existingLeads.isEmpty()) {
-            return 'You are already subscribed.';
+
+        if (leads.isEmpty()) {
+            res.success = false;
+            res.message = 'Invalid or expired link.';
+            return res;
         }
-
-        // Kreiraj Lead
-        Lead newLead = new Lead(
-            FirstName = 'Newsletter',
-            LastName  = 'Subscriber',
-            Email     = email,
-            Company   = 'Newsletter',
-            Status    = 'Subscribed',
-            LeadSource= 'Newsletter',
-            IndividualId = (individual != null ? individual.Id : null) // standard field
-            // Newsletter_Email_Sent__c ostaje default false
-        );
-        insert newLead;
-
-        // (Opcionalno) Ako postoji Individual, poveži postojeće odgovore na novi Lead
-        if (individual != null) {
-            List<Assessment__c> assessments = [
-                SELECT Id FROM Assessment__c WHERE Individual__c = :individual.Id
-            ];
-
-            List<AssessmentQuestionResponse__c> toUpdate = new List<AssessmentQuestionResponse__c>();
-            for (Assessment__c a : assessments) {
-                for (AssessmentQuestionResponse__c r : [
-                    SELECT Id FROM AssessmentQuestionResponse__c WHERE Assessment__c = :a.Id
-                ]) {
-                    r.Lead__c = newLead.Id;
-                    toUpdate.add(r);
-                }
-            }
-            if (!toUpdate.isEmpty()) update toUpdate;
-        }
-        return 'You are now subscribed to our newsletter';
-    }
-
-    // ---------- Email helperi (Org-Wide + Template) ----------
-
-    public static Id getOrgWideIdByAddress(String address) {
-        OrgWideEmailAddress owea = [
-            SELECT Id FROM OrgWideEmailAddress WHERE Address = :address LIMIT 1
-        ];
-        return owea.Id;
-    }
-
-    public static Id getTemplateIdByName(String templateName) {
-        EmailTemplate t = [
-            SELECT Id FROM EmailTemplate WHERE Name = :templateName LIMIT 1
-        ];
-        return t.Id;
-    }
-
-    // Sastavi SingleEmailMessage za Lead sa template-om
-    public static Messaging.SingleEmailMessage buildTemplatedEmail(Id leadId, String toEmail, Id templateId, Id orgWideId) {
-        if (leadId == null || String.isBlank(toEmail) || templateId == null) return null;
-        Messaging.SingleEmailMessage mail = new Messaging.SingleEmailMessage();
-        mail.setTargetObjectId(leadId);           // Lead/Contact obavezno za template
-        mail.setTemplateId(templateId);
-        mail.setToAddresses(new String[]{ toEmail });
-        if (orgWideId != null) mail.setOrgWideEmailAddressId(orgWideId);
-        mail.setSaveAsActivity(false);
-        return mail;
-    }
-
-    // (Zadržiš i postojeći unsubscribe)
-
-    @AuraEnabled
-    public static String unsubscribeFromNewsletter(String email) {
-        if (String.isBlank(email)) {
-            throw new AuraHandledException('Email is required.');
-        }
-        List<Lead> leads = [SELECT Id, Status, UnsubscribedDate__c FROM Lead WHERE Email = :email LIMIT 1];
-        if (leads.isEmpty()) return 'No subscription found for this email.';
 
         Lead l = leads[0];
+
+        // ❗ Uveri se da picklist sadrži vrednost "Unsubscribed"
         l.Status = 'Unsubscribed';
-        l.UnsubscribedDate__c = System.now();
-        update l;
+        // (opciono) takođe isključi email
+        l.Email_Opt_Out = true;
 
-        // Pošalji potvrdu o odjavi (ako imaš template)
-        if (Schema.getGlobalDescribe().get('EmailTemplate') != null) {
-            List<EmailTemplate> templates = [SELECT Id FROM EmailTemplate WHERE Name = 'NovoCare Newsletter Unsubscribe Email' LIMIT 1];
-            if (!templates.isEmpty()) {
-                Messaging.reserveSingleEmailCapacity(1);
-                Id owea = getOrgWideIdByAddress('nemo.spaske@gmail.com'); // promeni na svoju adresu
-                Messaging.SingleEmailMessage mail = buildTemplatedEmail(l.Id, email, templates[0].Id, owea);
-                Messaging.sendEmail(new List<Messaging.SingleEmailMessage>{ mail });
-            }
+        try {
+            update l;
+            res.success = true;
+            res.message = 'You have been unsubscribed successfully.';
+        } catch (Exception e) {
+            res.success = false;
+            res.message = 'Unexpected error while unsubscribing.';
         }
-        return 'You have been unsubscribed.';
+        return res;
     }
 }
 
+classes/NewsletterUnsubscribeController.cls-meta.xml
+
+<?xml version="1.0" encoding="UTF-8"?>
+<ApexClass xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>60.0</apiVersion>
+    <status>Active</status>
+</ApexClass>
+
 
 ---
 
-NCNewsletterScheduledEmail.cls (svakih 15 min, prozor 60–45 min)
+LWC: unsubscribe
 
-> Zameni IMENA TEMPLATE-OVA ispod prema stvarnim nazivima u tvojoj org-u:
-TPL_ASSESSMENT_DONE = „Email A”,
-TPL_WELCOME_COMPLETE_ASM = „Email B”.
+lwc/unsubscribe/unsubscribe.html
 
+<template>
+  <section class="slds-grid slds-grid_vertical slds-align_absolute-center slds-p-around_x-large"
+           style="min-height:60vh;">
+    <div class="slds-box slds-theme_default slds-size_1-of-1 slds-medium-size_6-of-12 slds-large-size_4-of-12">
+      <template if:true={loading}>
+        <div class="slds-text-align_center slds-p-around_medium">
+          <lightning-spinner alternative-text="Processing"></lightning-spinner>
+          <p class="slds-m-top_medium">Processing your request…</p>
+        </div>
+      </template>
 
+      <template if:false={loading}>
+        <template if:true={success}>
+          <div class="slds-text-align_center">
+            <lightning-icon icon-name="utility:success" size="large"></lightning-icon>
+            <h2 class="slds-text-heading_medium slds-m-top_medium">Unsubscribed</h2>
+            <p class="slds-m-top_small">{message}</p>
+          </div>
+        </template>
 
-global with sharing class NCNewsletterScheduledEmail implements Schedulable {
+        <template if:false={success}>
+          <div class="slds-text-align_center">
+            <lightning-icon icon-name="utility:error" size="large"></lightning-icon>
+            <h2 class="slds-text-heading_medium slds-m-top_medium">Unable to unsubscribe</h2>
+            <p class="slds-m-top_small">{message}</p>
+          </div>
+        </template>
+      </template>
+    </div>
+  </section>
+</template>
 
-    global void execute(SchedulableContext sc) {
+lwc/unsubscribe/unsubscribe.js
 
-        // Obradi lead-ove kreirane pre tačno ~1h (prozor 60–45 min)
-        Datetime windowStart = System.now().addMinutes(-60);
-        Datetime windowEnd   = System.now().addMinutes(-45);
+import { LightningElement, track } from 'lwc';
+import unsubscribeUser from '@salesforce/apex/NewsletterUnsubscribeController.unsubscribeUser';
 
-        List<Lead> leads = [
-            SELECT Id, Email, Status, IndividualId, Newsletter_Email_Sent__c
-            FROM Lead
-            WHERE CreatedDate >= :windowStart
-              AND CreatedDate  < :windowEnd
-              AND Newsletter_Email_Sent__c = false
-              AND Status = 'Subscribed'
-              AND Email != null
-            LIMIT 5000
-        ];
-        if (leads.isEmpty()) return;
+export default class Unsubscribe extends LightningElement {
+  @track loading = true;
+  @track success = false;
+  @track message = '';
 
-        // Sakupi IndividualId za lookup
-        Set<Id> individualIds = new Set<Id>();
-        for (Lead l : leads) if (l.IndividualId != null) individualIds.add(l.IndividualId);
+  connectedCallback() {
+    // Čitanje tokena iz query string-a: /s/unsubscribe?token=XXXXX
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token');
 
-        // Mapiraj: Individual -> ima li Assessment
-        Map<Id, Boolean> hasAsmByIndividual = new Map<Id, Boolean>();
-        if (!individualIds.isEmpty()) {
-            for (AggregateResult ar : [
-                SELECT Individual__c ind, COUNT(Id) c
-                FROM Assessment__c
-                WHERE Individual__c IN :individualIds
-                GROUP BY Individual__c
-            ]) {
-                hasAsmByIndividual.put((Id)ar.get('ind'), ((Decimal)ar.get('c')) > 0);
-            }
-        }
-
-        // Priprema template-ova i OrgWide
-        final String TPL_ASSESSMENT_DONE       = 'NovoCare Newsletter – Assessment Complete';          // Email A
-        final String TPL_WELCOME_COMPLETE_ASM  = 'NovoCare Newsletter – Welcome / Complete Assessment'; // Email B
-
-        Id tplA = NCNewsletterSignupService.getTemplateIdByName(TPL_ASSESSMENT_DONE);
-        Id tplB = NCNewsletterSignupService.getTemplateIdByName(TPL_WELCOME_COMPLETE_ASM);
-        Id owea = NCNewsletterSignupService.getOrgWideIdByAddress('nemo.spaske@gmail.com'); // promeni na svoju OWEA adresu
-
-        List<Messaging.SingleEmailMessage> msgs = new List<Messaging.SingleEmailMessage>();
-        for (Lead l : leads) {
-            Boolean hasAsm = l.IndividualId != null && hasAsmByIndividual.get(l.IndividualId) == true;
-            Id tpl = hasAsm ? tplA : tplB;
-            Messaging.SingleEmailMessage m = NCNewsletterSignupService.buildTemplatedEmail(l.Id, l.Email, tpl, owea);
-            if (m != null) msgs.add(m);
-        }
-
-        if (!msgs.isEmpty()) {
-            List<Messaging.SendEmailResult> res = Messaging.sendEmail(msgs, false);
-
-            // Obeleži poslate
-            List<Lead> toUpd = new List<Lead>();
-            for (Integer i = 0; i < res.size(); i++) {
-                if (res[i].isSuccess()) {
-                    Lead l = new Lead(Id = leads[i].Id);
-                    l.Newsletter_Email_Sent__c = true;
-                    toUpd.add(l);
-                } else {
-                    // ne bacaj exception da ne ubiješ job; samo log
-                    System.debug(LoggingLevel.WARN,
-                        'Email failed for Lead ' + leads[i].Id + ': ' +
-                        (res[i].getErrors().isEmpty() ? 'Unknown' : res[i].getErrors()[0].getMessage()));
-                }
-            }
-            if (!toUpd.isEmpty()) update toUpd;
-        }
+    if (!token) {
+      this.loading = false;
+      this.success = false;
+      this.message = 'Missing token.';
+      return;
     }
 
-    // Jedan raspored na 15 minuta
-    public static void scheduleEvery15Min() {
-        System.schedule('Newsletter job scheduler (15m)', '0 0/15 * * * ?', new NCNewsletterScheduledEmail());
-    }
+    unsubscribeUser({ token })
+      .then((res) => {
+        this.success = !!res?.success;
+        this.message = res?.message || (this.success ? 'Unsubscribed.' : 'Invalid link.');
+      })
+      .catch(() => {
+        this.success = false;
+        this.message = 'Unexpected error.';
+      })
+      .finally(() => {
+        this.loading = false;
+      });
+  }
 }
 
+lwc/unsubscribe/unsubscribe.js-meta.xml
+
+<?xml version="1.0" encoding="UTF-8"?>
+<LightningComponentBundle xmlns="http://soap.sforce.com/2006/04/metadata">
+  <apiVersion>60.0</apiVersion>
+  <isExposed>true</isExposed>
+  <targets>
+    <!-- Omogućava dodavanje u Experience Cloud Builder -->
+    <target>lightningCommunity__Page</target>
+    <target>lightningCommunity__Default</target>
+    <!-- (opciono) za interne app stranice -->
+    <target>lightning__AppPage</target>
+  </targets>
+</LightningComponentBundle>
+
 
 ---
 
-Kako da zakažeš (jedan jedini job)
+Kako povezati sve u Experience Cloud-u
 
-Setup → Apex Classes → Schedule Apex
-Name: Newsletter job scheduler (15m)
-CRON: 0 0/15 * * * ?
+1. Deploy gore navedene fajlove.
+
+
+2. Proveri da Lead Status picklist sadrži "Unsubscribed" (Setup → Object Manager → Lead → Fields → Lead Status).
+
+
+3. Guest User Permissions (važno!):
+
+Setup → Digital Experiences > All Sites → Workspace za tvoj sajt → Administration > Pages > Guest User Profile.
+
+Daj Apex Class Access na NewsletterUnsubscribeController.
+
+Daj Object Permissions na Lead: Read + Edit, i Field Level Security na Status, Newsletter_Token__c, Email_Opt_Out.
+
+
+
+4. U Experience Builder-u:
+
+Napravi novu stranu npr. “Unsubscribe” (URL: /unsubscribe).
+
+Dodaj LWC unsubscribe na stranu, Publish.
+
+
+
+5. U email template stavi link:
+
+https://<your-community-domain>/s/unsubscribe?token={{Lead.Newsletter_Token__c}}
+
+(ili {{Recipient.Newsletter_Token__c}} ako koristiš Recipient kontekst)
+
+
 
 
 ---
 
-Tip
+Brzi test
 
-Greška iz mejla EMAIL_ADDRESS_BOUNCED znači da je adresa obeležena kao bounced na Lead/Contact-u. Na zapisu klikni Reset Bounced Email (ili očisti polja EmailBouncedDate/EmailBouncedReason) pre testiranja.
+Uzmi Lead koji ima popunjen Newsletter_Token__c.
 
-Ako ti je objekat/field API ime drugačije (npr. Assessment umesto Assessment__c, AssessmentId/Assessment__c u odgovorima), samo reci tačna imena i prepakujem gore kod tačno na tvoja polja.
+Otvori u browseru:
+https://<your-community-domain>/s/unsubscribe?token=<taj_token>
+
+Trebalo bi da vidiš poruku o uspehu, a na Lead-u da je Status = Unsubscribed i Email Opt Out = true (ako si ostavio tu liniju).
+
+
+Ako želiš, mogu da ti dodam i logiku za postavljanje UnsubscribedDate__c ili audit (Task/Note) kad se neko odjavi.
+
 
 
 
