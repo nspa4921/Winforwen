@@ -1,5 +1,74 @@
+<template>
+  <section class="slds-grid slds-grid_vertical slds-align_absolute-center slds-p-around_x-large"
+           style="min-height:60vh;">
+    <div class="slds-box slds-theme_default slds-size_1-of-1 slds-medium-size_6-of-12 slds-large-size_4-of-12">
+      <template if:true={loading}>
+        <div class="slds-text-align_center slds-p-around_medium">
+          <lightning-spinner alternative-text="Processing"></lightning-spinner>
+          <p class="slds-m-top_medium">Processing your request…</p>
+        </div>
+      </template>
+
+      <template if:false={loading}>
+        <template if:true={success}>
+          <div class="slds-text-align_center">
+            <lightning-icon icon-name="utility:success" size="large"></lightning-icon>
+            <h2 class="slds-text-heading_medium slds-m-top_medium">Unsubscribed</h2>
+            <p class="slds-m-top_small">{message}</p>
+          </div>
+        </template>
+
+        <template if:false={success}>
+          <div class="slds-text-align_center">
+            <lightning-icon icon-name="utility:error" size="large"></lightning-icon>
+            <h2 class="slds-text-heading_medium slds-m-top_medium">Unable to unsubscribe</h2>
+            <p class="slds-m-top_small">{message}</p>
+          </div>
+        </template>
+      </template>
+    </div>
+  </section>
+</template>
+
+
+import { LightningElement, track } from 'lwc';
+import unsubscribeUser from '@salesforce/apex/NewsletterUnsubscribeController.unsubscribeUser';
+
+export default class Unsubscribe extends LightningElement {
+  @track loading = true;
+  @track success = false;
+  @track message = '';
+
+  connectedCallback() {
+    // Čitanje tokena iz query string-a: /s/unsubscribe?token=XXXXX
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token');
+
+    if (!token) {
+      this.loading = false;
+      this.success = false;
+      this.message = 'Missing token.';
+      return;
+    }
+
+    unsubscribeUser({ token })
+      .then((res) => {
+        this.success = !!res?.success;
+        this.message = res?.message || (this.success ? 'Unsubscribed.' : 'Invalid link.');
+      })
+      .catch(() => {
+        this.success = false;
+        this.message = 'Unexpected error.';
+      })
+      .finally(() => {
+        this.loading = false;
+      });
+  }
+}
+
 Super — evo gotovog Apex + LWC rešenja za public “Unsubscribe” stranu na Experience Cloud-u.
-Kada user klikne link iz emaila (.../s/unsubscribe?token=...), komponenta pročita token, pozove Apex i setuje Lead.Status = "Unsubscribed" (po želji i Email_Opt_Out = true). Prikaže se poruka o uspehu ili grešci.
+Kada user kli
+kne link iz emaila (.../s/unsubscribe?token=...), komponenta pročita token, pozove Apex i setuje Lead.Status = "Unsubscribed" (po želji i Email_Opt_Out = true). Prikaže se poruka o uspehu ili grešci.
 
 
 ---
