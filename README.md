@@ -145,6 +145,91 @@ global with sharing class NCNewsletterScheduledEmail implements Schedulable {
 }
 
 
+---//---
+
+@IsTest
+private class NCNewsletterSignupService_Test {
+    // Simple email mock: mark all messages as "sent successfully"
+    private class AllSuccessEmailMock implements Messaging.SendEmailMock {
+        public Messaging.SendEmailResult[] respond(Messaging.SendEmailRequest[] reqs) {
+            Messaging.SendEmailResult[] results = new Messaging.SendEmailResult[reqs.size()];
+            for (Integer i = 0; i < reqs.size(); i++) {
+                Messaging.SendEmailResult r = new Messaging.SendEmailResult();
+                r.isSuccess = true;
+                r.success = true;
+                results[i] = r;
+            }
+            return results;
+        }
+    }
+
+    // Optional: a mock that fails the 2nd email — uncomment if you want to cover the "failure" branch too
+    /*
+    private class OneFailureEmailMock implements Messaging.SendEmailMock {
+        public Messaging.SendEmailResult[] respond(Messaging.SendEmailRequest[] reqs) {
+            Messaging.SendEmailResult[] results = new Messaging.SendEmailResult[reqs.size()];
+            for (Integer i = 0; i < reqs.size(); i++) {
+                Messaging.SendEmailResult r = new Messaging.SendEmailResult();
+                if (i == 1) {
+                    r.isSuccess = false;
+                    r.success = false;
+                    r.errors = new Messaging.SendEmailError[] {
+                        new Messaging.SendEmailError('Simulated failure')
+                    };
+                } else {
+                    r.isSuccess = true;
+                    r.success = true;
+                }
+                results[i] = r;
+            }
+            return results;
+        }
+    }
+    */
+
+    @IsTest
+    static void test_SendEmails_UpdatesLeads() {
+        // --- Test data ---
+        List<Lead> leads = new List<Lead>{
+            new Lead(LastName='L1', Company='C1', Email='l1@example.com', Newsletter_Email_Sent__c=false),
+            new Lead(LastName='L2', Company='C2', Email='l2@example.com', Newsletter_Email_Sent__c=false),
+            // Ineligible lead (no email): should not be updated/sent
+            new Lead(LastName='NoEmail', Company='C3', Newsletter_Email_Sent__c=false)
+        };
+        insert leads;
+
+        // --- Mock email send so nothing real goes out ---
+        Test.setMock(Messaging.SendEmailMock.class, new AllSuccessEmailMock());
+        // If you want to also hit the "failure" branch, swap the mock:
+        // Test.setMock(Messaging.SendEmailMock.class, new OneFailureEmailMock());
+
+        Test.startTest();
+        // ❗️Replace this with YOUR real entry method that runs the logic you pasted.
+        // Examples you might have:
+        // NCNewsletterSignupService.run(); 
+        // NCNewsletterSignupBatch.execute(...);
+        // System.schedule('x','0 0 12 * * ?', new NCNewsletterSignupScheduler());
+        NCNewsletterSignupService.sendPendingNewsletterEmails();
+        Test.stopTest();
+
+        // --- Verify results ---
+        Map<Id, Lead> afterLeads = new Map<Id, Lead>([
+            SELECT Id, Email, Newsletter_Email_Sent__c
+            FROM Lead
+            WHERE Id IN :leads
+        ]);
+
+        // Sent ones should be true
+        System.assertEquals(true,  afterLeads.get(leads[0].Id).Newsletter_Email_Sent__c, 'Lead 1 should be marked sent');
+        System.assertEquals(true,  afterLeads.get(leads[1].Id).Newsletter_Email_Sent__c, 'Lead 2 should be marked sent');
+
+        // Ineligible one should remain false
+        System.assertEquals(false, afterLeads.get(leads[2].Id).Newsletter_Email_Sent__c, 'Lead without email should not be marked sent');
+    }
+}
+
+--//--
+
 # Salesforce DX Project: Next Steps
 
 Now that you’ve created a Salesforce DX project, what’s next? Here are some documentation resources to get you started.
