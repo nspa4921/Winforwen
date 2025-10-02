@@ -147,87 +147,125 @@ global with sharing class NCNewsletterScheduledEmail implements Schedulable {
 
 ---//---
 
-@IsTest
-private class NCNewsletterSignupService_Test {
-    // Simple email mock: mark all messages as "sent successfully"
-    private class AllSuccessEmailMock implements Messaging.SendEmailMock {
-        public Messaging.SendEmailResult[] respond(Messaging.SendEmailRequest[] reqs) {
-            Messaging.SendEmailResult[] results = new Messaging.SendEmailResult[reqs.size()];
-            for (Integer i = 0; i < reqs.size(); i++) {
-                Messaging.SendEmailResult r = new Messaging.SendEmailResult();
-                r.isSuccess = true;
-                r.success = true;
-                results[i] = r;
-            }
-            return results;
+@isTest
+private class NCNewsletterScheduledEmailTest {
+
+    @isTest
+    static void testExecute() {
+        // Get Folder Id
+        List<EmailTemplate> existingTemplates = [SELECT Id, FolderId FROM EmailTemplate LIMIT 1];
+        Id emailFolderId;
+
+        if (!existingTemplates.isEmpty()) {
+            emailFolderId = existingTemplates[0].FolderId;
+        } else {
+            System.assert(false, 'No Email Templates found. Please create at least one Email Template in your org.');
+            return;
         }
-    }
 
-    // Optional: a mock that fails the 2nd email — uncomment if you want to cover the "failure" branch too
-    /*
-    private class OneFailureEmailMock implements Messaging.SendEmailMock {
-        public Messaging.SendEmailResult[] respond(Messaging.SendEmailRequest[] reqs) {
-            Messaging.SendEmailResult[] results = new Messaging.SendEmailResult[reqs.size()];
-            for (Integer i = 0; i < reqs.size(); i++) {
-                Messaging.SendEmailResult r = new Messaging.SendEmailResult();
-                if (i == 1) {
-                    r.isSuccess = false;
-                    r.success = false;
-                    r.errors = new Messaging.SendEmailError[] {
-                        new Messaging.SendEmailError('Simulated failure')
-                    };
-                } else {
-                    r.isSuccess = true;
-                    r.success = true;
-                }
-                results[i] = r;
-            }
-            return results;
-        }
-    }
-    */
+        // Create Email Templates
+        EmailTemplate templateA = new EmailTemplate(
+            Name = 'NovoCare Newsletter Welcome Email',
+            DeveloperName = 'Newsletter_test_Template_A',
+            TemplateType = 'text',
+            Body = 'Test Email Template A',
+            FolderId = emailFolderId
+        );
+        insert templateA;
 
-    @IsTest
-    static void test_SendEmails_UpdatesLeads() {
-        // --- Test data ---
-        List<Lead> leads = new List<Lead>{
-            new Lead(LastName='L1', Company='C1', Email='l1@example.com', Newsletter_Email_Sent__c=false),
-            new Lead(LastName='L2', Company='C2', Email='l2@example.com', Newsletter_Email_Sent__c=false),
-            // Ineligible lead (no email): should not be updated/sent
-            new Lead(LastName='NoEmail', Company='C3', Newsletter_Email_Sent__c=false)
-        };
-        insert leads;
+        EmailTemplate templateB = new EmailTemplate(
+            Name = 'NovoCare Newsletter Assessment Not Completed',
+            DeveloperName = 'NovoCare_Newsletter_Unsubscribe_Email_Teamplte_B',
+            TemplateType = 'text',
+            Body = 'Test Email Template B',
+            FolderId = emailFolderId
+        );
+        insert templateB;
 
-        // --- Mock email send so nothing real goes out ---
-        Test.setMock(Messaging.SendEmailMock.class, new AllSuccessEmailMock());
-        // If you want to also hit the "failure" branch, swap the mock:
-        // Test.setMock(Messaging.SendEmailMock.class, new OneFailureEmailMock());
+        // Create an Individual
+        Individual individual = new Individual(
+            LastName = 'browser-1756721647940-qyh9hj8p8'
+        );
+        insert individual;
 
+        DateTime createdAt = System.now().addMinutes(-50); // 50 minutes ago
+        Date signupDate = createdAt.date();
+
+        // Create a Lead with the necessary fields
+        Lead leadWithAsm = new Lead(
+            FirstName = 'Test',
+            LastName = 'Lead',
+            Company = 'Test Company',
+            Email = 'test1@example.com',
+            Status = 'Subscribed',
+            Newsletter_Email_Sent__c = false,
+            Newsletter_Signup_Date__c = signupDate,
+            IndividualId = individual.Id
+        );
+
+        Lead leadWithoutAsm = new Lead(
+            FirstName = 'Test',
+            LastName = 'Lead',
+            Company = 'Test Company',
+            Email = 'test2@example.com',
+            Status = 'Subscribed',
+            Newsletter_Email_Sent__c = false,
+            Newsletter_Signup_Date__c = signupDate,
+            IndividualId = individual.Id
+        );
+
+        insert new List<Lead> { leadWithAsm, leadWithoutAsm };
+
+        // Create an Assessment record for the leadWithAsm
+        Assessment assessment = new Assessment(
+            Individual__c = individual.Id,
+            Name = 'Test Assessment',
+            AssessmentStatus = 'Completed'
+        );
+
+        insert assessment;
+
+        // Start the test
         Test.startTest();
-        // ❗️Replace this with YOUR real entry method that runs the logic you pasted.
-        // Examples you might have:
-        // NCNewsletterSignupService.run(); 
-        // NCNewsletterSignupBatch.execute(...);
-        // System.schedule('x','0 0 12 * * ?', new NCNewsletterSignupScheduler());
-        NCNewsletterSignupService.sendPendingNewsletterEmails();
+
+        // Schedule the job
+        NCNewsletterScheduledEmail scheduler = new NCNewsletterScheduledEmail();
+        String sch = '0 0 0 * * ?'; // Run immediately
+        String jobId = System.schedule('TestNewsletterScheduler', sch, scheduler);
+
         Test.stopTest();
 
-        // --- Verify results ---
-        Map<Id, Lead> afterLeads = new Map<Id, Lead>([
-            SELECT Id, Email, Newsletter_Email_Sent__c
-            FROM Lead
-            WHERE Id IN :leads
-        ]);
+        // Query the leads after the scheduled job has run
+        List<Lead> updatedLeads = [SELECT Id, Newsletter_Email_Sent__c FROM Lead WHERE Id IN :new List<Id>{leadWithAsm.Id, leadWithoutAsm.Id}];
 
-        // Sent ones should be true
-        System.assertEquals(true,  afterLeads.get(leads[0].Id).Newsletter_Email_Sent__c, 'Lead 1 should be marked sent');
-        System.assertEquals(true,  afterLeads.get(leads[1].Id).Newsletter_Email_Sent__c, 'Lead 2 should be marked sent');
+        // Assert outcomes
+        // leadWithAsm should have Newsletter_Email_Sent__c = true
+        // leadWithoutAsm should also have Newsletter_Email_Sent__c = true
+        // Assuming both emails are valid and sent successfully
+        System.assertEquals(true, updatedLeads[0].Newsletter_Email_Sent__c, 'Lead with assessment should have email sent.');
+        System.assertEquals(true, updatedLeads[1].Newsletter_Email_Sent__c, 'Lead without assessment should have email sent.');
+    }
 
-        // Ineligible one should remain false
-        System.assertEquals(false, afterLeads.get(leads[2].Id).Newsletter_Email_Sent__c, 'Lead without email should not be marked sent');
+    @isTest
+    static void testNoLeadsToProcess() {
+        // Start the test
+        Test.startTest();
+
+        // Schedule the job
+        NCNewsletterScheduledEmail scheduler = new NCNewsletterScheduledEmail();
+        String sch = '0 0 0 * * ?'; // Run immediately
+        String jobId = System.schedule('TestNewsletterSchedulerNoLeads', sch, scheduler);
+
+        Test.stopTest();
+
+        // Since there are no leads, the logs should indicate no emails to send
+        // You can check the debug logs to verify that it correctly logged no emails to send
     }
 }
 
+error:
+System.DmlException: Insert failed. First exception on row 0; first error: MIXED_DML_OPERATION, DML operation on setup object is not permitted after you have updated a non-setup object (or vice versa): Lead, original object: EmailTemplate: []
+Class.NCNewsletterScheduledEmailTest.testExecute: line 68, column 1
 --//--
 
 # Salesforce DX Project: Next Steps
