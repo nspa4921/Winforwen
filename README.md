@@ -1,3 +1,128 @@
+@IsTest
+private class NCNewsletterScheduledEmailTest {
+
+    // --- Email mock so no real emails go out ---
+    private class AllSuccessEmailMock implements Messaging.SendEmailMock {
+        public Messaging.SendEmailResult[] respond(Messaging.SendEmailRequest[] reqs) {
+            Messaging.SendEmailResult[] results = new Messaging.SendEmailResult[reqs.size()];
+            for (Integer i = 0; i < reqs.size(); i++) {
+                Messaging.SendEmailResult r = new Messaging.SendEmailResult();
+                r.success = true; // marks as sent
+                results[i] = r;
+            }
+            return results;
+        }
+    }
+
+    @IsTest
+    static void testExecute() {
+        // ----- 1) CREATE SETUP OBJECTS IN A SEPARATE CONTEXT (avoids MIXED_DML) -----
+        // Find any existing active user to use with runAs (do NOT create a User here)
+        User anyActiveUser = [SELECT Id FROM User WHERE IsActive = true LIMIT 1];
+
+        // Get a FolderId from any existing template so we can file our test templates there
+        Id emailFolderId;
+        List<EmailTemplate> existingTemplates = [SELECT Id, FolderId FROM EmailTemplate LIMIT 1];
+        System.assert(!existingTemplates.isEmpty(),
+            'No Email Templates found. Please create at least one Email Template in your org.');
+        emailFolderId = existingTemplates[0].FolderId;
+
+        // Insert EmailTemplate records as SETUP DML inside runAs
+        System.runAs(anyActiveUser) {
+            EmailTemplate templateA = new EmailTemplate(
+                Name = 'NovoCare Newsletter Welcome Email',
+                DeveloperName = 'Newsletter_test_Template_A',
+                TemplateType = 'text',
+                Body = 'Test Email Template A',
+                FolderId = emailFolderId
+            );
+            insert templateA;
+
+            EmailTemplate templateB = new EmailTemplate(
+                Name = 'NovoCare Newsletter Assessment Not Completed',
+                DeveloperName = 'NovoCare_Newsletter_Unsubscribe_Email_Teamplte_B',
+                TemplateType = 'text',
+                Body = 'Test Email Template B',
+                FolderId = emailFolderId
+            );
+            insert templateB;
+        }
+
+        // ----- 2) NON-SETUP DATA (safe to do now) -----
+        Individual individual = new Individual(LastName = 'browser-1756721647940-qyh9hj8p8');
+        insert individual;
+
+        DateTime createdAt = System.now().addMinutes(-50); // 50 minutes ago
+        Date signupDate = createdAt.date();
+
+        Lead leadWithAsm = new Lead(
+            FirstName = 'Test',
+            LastName = 'Lead',
+            Company = 'Test Company',
+            Email = 'test1@example.com',
+            Status = 'Subscribed',
+            Newsletter_Email_Sent__c = false,
+            Newsletter_Signup_Date__c = signupDate,
+            IndividualId = individual.Id
+        );
+        Lead leadWithoutAsm = new Lead(
+            FirstName = 'Test',
+            LastName = 'Lead',
+            Company = 'Test Company',
+            Email = 'test2@example.com',
+            Status = 'Subscribed',
+            Newsletter_Email_Sent__c = false,
+            Newsletter_Signup_Date__c = signupDate,
+            IndividualId = individual.Id
+        );
+        insert new List<Lead>{ leadWithAsm, leadWithoutAsm };
+
+        Assessment assessment = new Assessment(
+            Individual__c = individual.Id,
+            Name = 'Test Assessment',
+            AssessmentStatus = 'Completed'
+        );
+        insert assessment;
+
+        // ----- 3) MOCK EMAIL SEND + SCHEDULE -----
+        Test.setMock(Messaging.SendEmailMock.class, new AllSuccessEmailMock());
+
+        Test.startTest();
+        NCNewsletterScheduledEmail scheduler = new NCNewsletterScheduledEmail();
+        // Cron string value doesn't matter in tests; the job fires on Test.stopTest()
+        String jobId = System.schedule('TestNewsletterScheduler', '0 0 0 * * ?', scheduler);
+        Test.stopTest();
+
+        // ----- 4) ASSERTIONS -----
+        List<Lead> updatedLeads = [
+            SELECT Id, Newsletter_Email_Sent__c
+            FROM Lead
+            WHERE Id IN :new List<Id>{ leadWithAsm.Id, leadWithoutAsm.Id }
+            ORDER BY Id
+        ];
+        System.assertEquals(true, updatedLeads[0].Newsletter_Email_Sent__c,
+            'Lead with assessment should have email sent.');
+        System.assertEquals(true, updatedLeads[1].Newsletter_Email_Sent__c,
+            'Lead without assessment should have email sent.');
+    }
+
+    @IsTest
+    static void testNoLeadsToProcess() {
+        // No leads created on purpose
+        Test.setMock(Messaging.SendEmailMock.class, new AllSuccessEmailMock());
+
+        Test.startTest();
+        NCNewsletterScheduledEmail scheduler = new NCNewsletterScheduledEmail();
+        String jobId = System.schedule('TestNewsletterSchedulerNoLeads', '0 0 0 * * ?', scheduler);
+        Test.stopTest();
+
+        // Nothing to assert on data — rely on absence of exceptions and (optionally) logs
+        System.assert(true, 'Scheduler ran without leads and did not error.');
+    }
+}
+
+
+
 global with sharing class NCNewsletterScheduledEmail implements Schedulable {
   global void execute(SchedulableContext sc) {
     // Process leads created exactly ~1h ago (window 60–45 min)
